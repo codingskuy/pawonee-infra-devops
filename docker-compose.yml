@@ -1,33 +1,65 @@
+# Lokal: docker compose --env-file env/lokal.env up --build
+# (salin env/lokal.env.example -> env/lokal.env dulu; berkas itu diabaikan git).
+# Repo backend/pipeline diharapkan berdampingan di ../../ (susunan super-apps).
 services:
   db:
     image: postgres:16.4
     environment:
       POSTGRES_DB: pawonee
       POSTGRES_USER: pawonee
-      POSTGRES_PASSWORD: pawonee
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?isi POSTGRES_PASSWORD di env/lokal.env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pawonee-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pawonee -d pawonee"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build:
       context: ../../pawonee-backend-service
     environment:
-      DATABASE_URL: postgres://pawonee:pawonee@db:5432/pawonee
+      DATABASE_URL: ${DATABASE_URL:?isi DATABASE_URL di env/lokal.env}
+      JWT_RAHASIA: ${JWT_RAHASIA:?isi JWT_RAHASIA (>=32 karakter) di env/lokal.env}
+      PEDAREE_BASE_URL: ${PEDAREE_BASE_URL:-}
+      PEDAREE_SERVICE_KEY: ${PEDAREE_SERVICE_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "8080:8080"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
+  # Penjadwal sinyal.pedaree.v1: satu siklus tiap 15 menit (config/pipeline.yaml: */15 * * * *).
   pipeline:
     build:
       context: ../../pawonee-data-pipeline
     environment:
-      DATABASE_URL: postgres://pawonee:pawonee@db:5432/pawonee
+      DATABASE_URL: ${DATABASE_URL:?isi DATABASE_URL di env/lokal.env}
+    entrypoint: ["sh", "-c"]
+    command:
+      - 'while true; do python src/pipeline.py --sekali || echo "siklus gagal; coba lagi 15 menit"; sleep 900; done'
     depends_on:
-      - db
-      - backend
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  # Agregat serapan mingguan (minggu WIB tertutup). Manual:
+  #   docker compose --env-file env/lokal.env --profile mingguan run --rm pipeline-mingguan
+  pipeline-mingguan:
+    profiles: ["mingguan"]
+    build:
+      context: ../../pawonee-data-pipeline
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?isi DATABASE_URL di env/lokal.env}
+    command: ["python", "src/pipeline.py", "--serapan-mingguan"]
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pawonee-db:
