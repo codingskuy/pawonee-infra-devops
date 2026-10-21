@@ -1,0 +1,54 @@
+# Penjadwal data-pipeline Pawonee. Konfigurasi sumber: pawonee-data-pipeline/config/pipeline.yaml
+# Sinyal sinyal.pedaree.v1 tiap 15 menit; agregat serapan mingguan Senin 00.05 WIB (= Minggu 17.05 UTC,
+# minggu WIB sudah tertutup Minggu 23.59). Idempoten per (keluarga_id, periode_mulai), aman diulang.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pawonee-sinyal-pedaree
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pipeline
+              image: ghcr.io/coding-skuy/pawonee-data-pipeline:0.1.0
+              args: ["python", "src/pipeline.py", "--sekali"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: pawonee-db
+                      key: url
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pawonee-serapan-mingguan
+spec:
+  schedule: "5 17 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 4
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pipeline
+              image: ghcr.io/coding-skuy/pawonee-data-pipeline:0.1.0
+              args: ["python", "src/pipeline.py", "--serapan-mingguan"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: pawonee-db
+                      key: url
