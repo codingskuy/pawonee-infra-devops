@@ -1,1 +1,15 @@
 .DS_Store
+
+# graphify (artefak lokal)
+graphify-out/
+
+# rahasia lokal (jangan pernah di-commit)
+.env
+.env.*
+!.env.example
+!env/*.env.example
+*.pem
+*.jks
+*.keystore
+k8s/secret.yaml
+k8s/*.secret.yaml
