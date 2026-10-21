@@ -1,0 +1,47 @@
+name: gerbang-crashfree
+
+# Mencatat gerbang crash-free >= 99,5% sebelum menaikkan tahap beta/produksi (PWN-OPS-004).
+# Angka diambil operator dari dasbor (Play Console Android vitals + Firebase Crashlytics untuk iOS)
+# dan dimasukkan di sini; hasil gerbang tercatat di ringkasan run (jejak audit).
+on:
+  workflow_dispatch:
+    inputs:
+      tahap:
+        description: Tahap yang hendak dibuka
+        type: choice
+        options: [beta-20-keluarga, beta-100-keluarga, produksi]
+        required: true
+      persen_android:
+        description: Crash-free pengguna Android 28 hari (mis. 99.62)
+        required: true
+      persen_ios:
+        description: Crash-free pengguna iOS 28 hari (mis. 99.71)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  gerbang:
+    runs-on: ubuntu-latest
+    env:
+      TAHAP: ${{ inputs.tahap }}
+      ANDROID: ${{ inputs.persen_android }}
+      IOS: ${{ inputs.persen_ios }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck scripts/release/*.sh
+      - run: bash scripts/release/cek-crashfree.test.sh
+      - name: Gerbang Android
+        run: scripts/release/cek-crashfree.sh "$ANDROID"
+      - name: Gerbang iOS
+        run: scripts/release/cek-crashfree.sh "$IOS"
+      - name: Catat
+        if: always()
+        run: |
+          {
+            echo "### Gerbang crash-free"
+            echo "- tahap: $TAHAP"
+            echo "- Android: $ANDROID% | iOS: $IOS% | ambang: 99,5%"
+            echo "- hasil job: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
