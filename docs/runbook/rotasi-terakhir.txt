@@ -1,0 +1,5 @@
+# Tanggal rotasi terakhir per secret (YYYY-MM-DD). BUKAN nilai rahasia.
+# Diperbarui lewat PR setiap selesai rotasi (docs/runbook/rotasi-secret.md). Batas: 90 hari.
+# Tanggal awal = hari penetapan jadwal; ganti dengan tanggal rotasi nyata saat kunci produksi dibuat.
+pedaree-service-key=2026-10-21
+jwt-rahasia=2026-10-21
