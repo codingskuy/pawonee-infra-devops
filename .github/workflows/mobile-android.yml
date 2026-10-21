@@ -1,0 +1,121 @@
+name: mobile-android
+
+# Jalur rilis Android beta (PWN-OPS-004): APK sideload + Play Store internal testing.
+# Tanpa kredensial di repo: keystore dan akun layanan Play diambil dari GitHub Environment "mobile-beta".
+# Tanpa secret penandatanganan, job hanya menghasilkan APK debug tak-bertanda (BUKAN untuk dibagikan).
+on:
+  push:
+    tags: ["mobile-v*"]
+  workflow_dispatch:
+    inputs:
+      versi:
+        description: Versi rilis tanpa awalan (mis. 0.1.0-beta.1)
+        type: string
+        required: true
+      ref_app:
+        description: Branch/tag pawonee-app-kmp yang dibangun
+        type: string
+        default: main
+      jalur:
+        description: Jalur distribusi
+        type: choice
+        options: [apk-sideload, play-internal]
+        default: apk-sideload
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-android-${{ github.ref }}-${{ inputs.versi }}
+  cancel-in-progress: false
+
+jobs:
+  qa-gate:
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref_app: ${{ inputs.ref_app || 'main' }}
+    secrets: inherit
+
+  bangun:
+    needs: qa-gate
+    runs-on: ubuntu-latest
+    environment: mobile-beta
+    env:
+      KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      PLAY_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+      CROSS_TOKEN: ${{ secrets.CROSS_REPO_TOKEN || github.token }}
+      VERSI_MASUKAN: ${{ inputs.versi || github.ref_name }}
+    outputs:
+      versi: ${{ steps.versi.outputs.versi }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tetapkan versi
+        id: versi
+        run: |
+          v="${VERSI_MASUKAN#mobile-v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "versi tidak valid: $v" >&2; exit 1; }
+          echo "versi=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: Coding-Skuy/pawonee-app-kmp
+          ref: ${{ inputs.ref_app || 'main' }}
+          path: app
+          token: ${{ env.CROSS_TOKEN }}
+      - name: Prasyarat Gradle
+        run: test -x app/gradlew || { echo "pawonee-app-kmp belum punya gradlew; build Android tidak bisa jalan." >&2; exit 1; }
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Siapkan keystore (bila ada)
+        id: ttd
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/rilis.jks"
+            echo "bertanda=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=tanpa penandatanganan::secret ANDROID_KEYSTORE_B64 kosong; hanya APK debug tak-bertanda."
+            echo "bertanda=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bangun rilis bertanda (APK + AAB)
+        if: steps.ttd.outputs.bertanda == 'true'
+        working-directory: app
+        run: >
+          ./gradlew --no-daemon :composeApp:assembleRelease :composeApp:bundleRelease
+          -Pandroid.injected.signing.store.file="$RUNNER_TEMP/rilis.jks"
+          -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD"
+          -Pandroid.injected.signing.key.alias="$KEY_ALIAS"
+          -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          -PversionName="${{ steps.versi.outputs.versi }}"
+      - name: Bangun debug tak-bertanda
+        if: steps.ttd.outputs.bertanda != 'true'
+        working-directory: app
+        run: ./gradlew --no-daemon :composeApp:assembleDebug
+      - name: Kumpulkan artefak per versi
+        run: |
+          mkdir -p keluaran
+          find app/composeApp/build/outputs \( -name '*.apk' -o -name '*.aab' \) -exec cp {} keluaran/ \;
+          compgen -G 'keluaran/*' >/dev/null || { echo "tidak ada artefak build" >&2; exit 1; }
+          (cd keluaran && sha256sum -- * > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pawonee-android-${{ steps.versi.outputs.versi }}${{ steps.ttd.outputs.bertanda != 'true' && '-debug-taktandai' || '' }}
+          path: keluaran/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Unggah ke Play internal testing
+        if: inputs.jalur == 'play-internal' && steps.ttd.outputs.bertanda == 'true'
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ env.PLAY_JSON }}
+          packageName: ${{ vars.ANDROID_PACKAGE_NAME }}
+          releaseFiles: keluaran/*.aab
+          track: internal
+          status: completed
+      - name: Jalur Play dilewati
+        if: inputs.jalur == 'play-internal' && steps.ttd.outputs.bertanda != 'true'
+        run: echo "::error title=play-internal::butuh build bertanda (ANDROID_KEYSTORE_B64) dan PLAY_SERVICE_ACCOUNT_JSON" && exit 1
