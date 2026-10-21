@@ -1,0 +1,98 @@
+name: deploy
+
+# Deploy/rollback manual ke k8s per lingkungan (PWN-OPS-003). Tanpa kredensial di repo:
+# kubeconfig diambil dari secret GitHub Environment (staging/produksi) bernama KUBE_CONFIG_B64.
+# Deploy WAJIB melewati qa-gate hijau (AGENTS: dilarang deploy tanpa QA gate hijau).
+on:
+  workflow_dispatch:
+    inputs:
+      lingkungan:
+        description: Lingkungan target
+        type: choice
+        options: [staging, produksi]
+        required: true
+      aksi:
+        description: deploy atau rollback ke revisi sebelumnya
+        type: choice
+        options: [deploy, rollback]
+        default: deploy
+      tag_backend:
+        description: Tag image backend (mis. 0.1.0); wajib untuk deploy
+        type: string
+      tag_pipeline:
+        description: Tag image data-pipeline (mis. 0.1.0); wajib untuk deploy
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.lingkungan }}
+  cancel-in-progress: false
+
+env:
+  NS: pawonee
+
+jobs:
+  qa-gate:
+    if: inputs.aksi == 'deploy'
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    if: inputs.aksi == 'deploy'
+    needs: qa-gate
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.lingkungan }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validasi masukan
+        env:
+          TB: ${{ inputs.tag_backend }}
+          TP: ${{ inputs.tag_pipeline }}
+        run: |
+          [[ "$TB" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "tag_backend wajib dan hanya [0-9A-Za-z._-]" >&2; exit 1; }
+          [[ "$TP" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "tag_pipeline wajib dan hanya [0-9A-Za-z._-]" >&2; exit 1; }
+      - name: Siapkan kubeconfig
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          [ -n "$KUBE_CONFIG_B64" ] || { echo "secret KUBE_CONFIG_B64 belum diatur di Environment" >&2; exit 1; }
+          mkdir -p "$HOME/.kube"
+          echo "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Terapkan manifest (secret TIDAK disentuh; dibuat manual, lihat runbook)
+        run: |
+          kubectl -n "$NS" apply -f k8s/postgres.yaml -f k8s/backend-deployment.yaml -f k8s/pipeline-cronjob.yaml
+      - name: Pasang tag image
+        env:
+          TB: ${{ inputs.tag_backend }}
+          TP: ${{ inputs.tag_pipeline }}
+        run: |
+          kubectl -n "$NS" set image deployment/pawonee-backend "backend=ghcr.io/coding-skuy/pawonee-backend-service:${TB}"
+          kubectl -n "$NS" set image cronjob/pawonee-sinyal-pedaree "pipeline=ghcr.io/coding-skuy/pawonee-data-pipeline:${TP}"
+          kubectl -n "$NS" set image cronjob/pawonee-serapan-mingguan "pipeline=ghcr.io/coding-skuy/pawonee-data-pipeline:${TP}"
+      - name: Tunggu rollout; batalkan otomatis bila gagal
+        run: |
+          if ! kubectl -n "$NS" rollout status deployment/pawonee-backend --timeout=180s; then
+            echo "Rollout gagal; rollback otomatis." >&2
+            kubectl -n "$NS" rollout undo deployment/pawonee-backend
+            kubectl -n "$NS" rollout status deployment/pawonee-backend --timeout=180s
+            exit 1
+          fi
+
+  rollback:
+    if: inputs.aksi == 'rollback'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.lingkungan }}
+    steps:
+      - name: Siapkan kubeconfig
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          [ -n "$KUBE_CONFIG_B64" ] || { echo "secret KUBE_CONFIG_B64 belum diatur di Environment" >&2; exit 1; }
+          mkdir -p "$HOME/.kube"
+          echo "$KUBE_CONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - run: kubectl -n "$NS" rollout undo deployment/pawonee-backend
+      - run: kubectl -n "$NS" rollout status deployment/pawonee-backend --timeout=180s
