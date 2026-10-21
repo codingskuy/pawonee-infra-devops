@@ -1,0 +1,106 @@
+name: mobile-ios
+
+# Jalur TestFlight (PWN-OPS-004). Kredensial Apple hanya dari GitHub Environment "mobile-beta".
+# Asumsi (belum ada di pawonee-app-kmp): proyek Xcode `iosApp/iosApp.xcodeproj`, skema `iosApp`,
+# dan `iosApp/ExportOptions.plist`; sesuaikan input bila berbeda.
+on:
+  push:
+    tags: ["mobile-v*"]
+  workflow_dispatch:
+    inputs:
+      versi:
+        description: Versi rilis tanpa awalan (mis. 0.1.0-beta.1)
+        type: string
+        required: true
+      ref_app:
+        description: Branch/tag pawonee-app-kmp yang dibangun
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-ios-${{ github.ref }}-${{ inputs.versi }}
+  cancel-in-progress: false
+
+jobs:
+  qa-gate:
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref_app: ${{ inputs.ref_app || 'main' }}
+    secrets: inherit
+
+  testflight:
+    needs: qa-gate
+    runs-on: macos-14
+    environment: mobile-beta
+    env:
+      P12_B64: ${{ secrets.IOS_CERT_P12_B64 }}
+      P12_PASSWORD: ${{ secrets.IOS_CERT_P12_PASSWORD }}
+      PROFIL_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_B64 }}
+      ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      ASC_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+      ASC_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+      CROSS_TOKEN: ${{ secrets.CROSS_REPO_TOKEN || github.token }}
+      VERSI_MASUKAN: ${{ inputs.versi || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prasyarat kredensial
+        id: kredensial
+        run: |
+          v="${VERSI_MASUKAN#mobile-v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "versi tidak valid: $v" >&2; exit 1; }
+          echo "versi=$v" >> "$GITHUB_OUTPUT"
+          if [ -n "$P12_B64" ] && [ -n "$PROFIL_B64" ] && [ -n "$ASC_PRIVATE_KEY" ]; then
+            echo "ada=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=testflight::kredensial Apple belum diatur di Environment mobile-beta; job tidak membangun/mengunggah apa pun."
+            echo "ada=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.kredensial.outputs.ada == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Coding-Skuy/pawonee-app-kmp
+          ref: ${{ inputs.ref_app || 'main' }}
+          path: app
+          token: ${{ env.CROSS_TOKEN }}
+      - if: steps.kredensial.outputs.ada == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - if: steps.kredensial.outputs.ada == 'true'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ env.P12_B64 }}
+          p12-password: ${{ env.P12_PASSWORD }}
+      - if: steps.kredensial.outputs.ada == 'true'
+        name: Pasang provisioning profile
+        run: |
+          d="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$d"
+          echo "$PROFIL_B64" | base64 -d > "$d/pawonee.mobileprovision"
+      - if: steps.kredensial.outputs.ada == 'true'
+        name: Arsip dan ekspor IPA
+        working-directory: app/iosApp
+        run: |
+          xcodebuild -project iosApp.xcodeproj -scheme iosApp -configuration Release \
+            -archivePath "$RUNNER_TEMP/pawonee.xcarchive" \
+            MARKETING_VERSION="${{ steps.kredensial.outputs.versi }}" archive
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/pawonee.xcarchive" \
+            -exportOptionsPlist ExportOptions.plist -exportPath "$RUNNER_TEMP/ipa"
+      - if: steps.kredensial.outputs.ada == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pawonee-ios-${{ steps.kredensial.outputs.versi }}
+          path: ${{ runner.temp }}/ipa/*.ipa
+          retention-days: 90
+          if-no-files-found: error
+      - if: steps.kredensial.outputs.ada == 'true'
+        uses: apple-actions/upload-testflight-build@v1
+        with:
+          app-path: ${{ runner.temp }}/ipa/iosApp.ipa
+          issuer-id: ${{ env.ASC_ISSUER_ID }}
+          api-key-id: ${{ env.ASC_KEY_ID }}
+          api-private-key: ${{ env.ASC_PRIVATE_KEY }}
